@@ -1,0 +1,1343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cats vs Capybaras</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: linear-gradient(180deg, #0a0a1a 0%, #1a1a3a 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            font-family: 'Arial', sans-serif;
+            overflow: hidden;
+        }
+
+        #ui {
+            color: white;
+            text-align: center;
+            margin-bottom: 8px;
+            font-size: 14px;
+            height: 24px;
+            font-weight: bold;
+        }
+
+        canvas {
+            border: 3px solid #4a4a8a;
+            border-radius: 8px;
+            background: #0f0f2e;
+            cursor: crosshair;
+            display: block;
+            box-shadow: 0 0 20px rgba(100, 150, 255, 0.3);
+        }
+
+        #controls {
+            color: #aaa;
+            font-size: 12px;
+            margin-top: 10px;
+            max-width: 900px;
+            line-height: 1.4;
+        }
+
+        .highlight {
+            color: #ffdd44;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui"><span id="turnInfo">Initializing...</span></div>
+    <canvas id="gameCanvas"></canvas>
+    <div id="controls">
+        <span class="highlight">← →</span> Move |
+        <span class="highlight">Space</span> Jump |
+        <span class="highlight">Mouse</span> Aim |
+        <span class="highlight">Click + Hold → Release</span> Charge & Fire |
+        <span class="highlight">1/2/3</span> Select Weapon |
+        <span class="highlight">R</span> Restart
+    </div>
+
+    <script>
+        // ================================================================
+        // CATS VS CAPYBARAS - HTML5 Prototype
+        // Turn-based physics combat game inspired by Worms Armageddon
+        // ================================================================
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const VIEWPORT_W = 900; // Display width
+        const VIEWPORT_H = 500; // Display height
+        const WORLD_W = 2500; // Actual world width
+        const WORLD_H = 500;
+        canvas.width = VIEWPORT_W;
+        canvas.height = VIEWPORT_H;
+
+        const GRAVITY = 0.35;
+        const TURN_TIME = 35;
+
+        // Camera system
+        let cameraX = 0;
+        let cameraY = 0;
+        let cameraTargetX = 0;
+        let cameraTargetY = 0;
+        const CAM_PAN_SPEED = 1000; // ms to pan across full screen
+
+        // ================================================================
+        // TERRAIN SYSTEM
+        // ================================================================
+        const terrainCanvas = document.createElement('canvas');
+        terrainCanvas.width = WORLD_W;
+        terrainCanvas.height = WORLD_H;
+        const tCtx = terrainCanvas.getContext('2d', { willReadFrequently: true });
+
+        // Precomputed stars for the sky
+        const stars = Array.from({ length: 80 }, () => ({
+            x: Math.random() * WORLD_W,
+            y: Math.random() * WORLD_H * 0.5,
+            r: 0.5 + Math.random() * 1.5,
+            bright: Math.random()
+        }));
+
+        function generateTerrain() {
+            tCtx.clearRect(0, 0, WORLD_W, WORLD_H);
+
+            const heights = [];
+            const canyonStart = 850;
+            const canyonEnd = 1650;
+            const canyonDepth = WORLD_H + 100; // Goes below world - truly impassable
+
+            for (let x = 0; x < WORLD_W; x++) {
+                let h = WORLD_H * 0.58;
+                h += Math.sin(x * 0.005) * 55;
+                h += Math.sin(x * 0.015 + 1.2) * 30;
+                h += Math.sin(x * 0.035 + 0.7) * 16;
+                h += Math.sin(x * 0.08 + 2.0) * 8;
+
+                // Create DEEP impassable canyon in middle
+                if (x >= canyonStart && x <= canyonEnd) {
+                    // Deep V-shaped canyon that extends below terrain
+                    const distFromCenter = Math.abs(x - (canyonStart + canyonEnd) / 2);
+                    const maxDistFromCenter = (canyonEnd - canyonStart) / 2;
+                    const canyonFactor = Math.pow(distFromCenter / maxDistFromCenter, 0.7); // Gentler walls
+                    h = WORLD_H * 0.58 + (canyonFactor * canyonDepth) - canyonDepth;
+                }
+
+                heights[x] = h; // Don't clamp - let canyon go deep
+            }
+
+            // Draw dirt with gradient
+            const dirtGrad = tCtx.createLinearGradient(0, WORLD_H * 0.3, 0, WORLD_H);
+            dirtGrad.addColorStop(0, '#6b8c3a');
+            dirtGrad.addColorStop(0.06, '#8a6018');
+            dirtGrad.addColorStop(0.3, '#6b4a12');
+            dirtGrad.addColorStop(1, '#3d2a08');
+            tCtx.fillStyle = dirtGrad;
+            tCtx.beginPath();
+            tCtx.moveTo(0, WORLD_H);
+            for (let x = 0; x < WORLD_W; x++) tCtx.lineTo(x, heights[x]);
+            tCtx.lineTo(WORLD_W, WORLD_H);
+            tCtx.closePath();
+            tCtx.fill();
+
+            // Grass line on top
+            tCtx.lineWidth = 4;
+            tCtx.strokeStyle = '#5a8a30';
+            tCtx.beginPath();
+            for (let x = 0; x < WORLD_W; x++) {
+                x === 0 ? tCtx.moveTo(x, heights[x]) : tCtx.lineTo(x, heights[x]);
+            }
+            tCtx.stroke();
+        }
+
+        let terrainHeights = generateTerrain();
+
+        function isSolid(x, y) {
+            const ix = Math.round(x);
+            const iy = Math.round(y);
+            if (ix < 0 || ix >= WORLD_W || iy < 0) return false;
+            if (iy >= WORLD_H) return true;
+            const d = tCtx.getImageData(ix, iy, 1, 1).data;
+            return d[3] > 10;
+        }
+
+        function destroyTerrain(cx, cy, radius) {
+            tCtx.save();
+            tCtx.globalCompositeOperation = 'destination-out';
+            tCtx.beginPath();
+            tCtx.arc(cx, cy, radius, 0, Math.PI * 2);
+            tCtx.fill();
+            tCtx.restore();
+        }
+
+        function getGroundY(x) {
+            for (let y = 0; y < WORLD_H; y++) {
+                if (isSolid(x, y)) return y;
+            }
+            return WORLD_H;
+        }
+
+        // ================================================================
+        // CHARACTER CLASS
+        // ================================================================
+        class Character {
+            constructor(x, y, team, name) {
+                this.x = x;
+                this.y = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.team = team; // 'cat' or 'capy'
+                this.name = name;
+                this.hp = 100;
+                this.maxHp = 100;
+                this.grounded = false;
+                this.facing = team === 'cat' ? 1 : -1;
+                this.dead = false;
+                this.walkCycle = 0;
+                this.stunned = 0;
+            }
+
+            get isActive() {
+                return gameState.getCurrentChar() === this;
+            }
+
+            update() {
+                if (this.dead) return;
+
+                this.vy += GRAVITY;
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vx *= 0.85;
+
+                if (this.stunned > 0) this.stunned--;
+
+                // Ground collision
+                this.grounded = false;
+                let pushAttempts = 0;
+                while (isSolid(this.x, this.y) && pushAttempts < 20) {
+                    this.y -= 1;
+                    if (this.vy > 0) this.vy = 0;
+                    this.grounded = true;
+                    pushAttempts++;
+                }
+
+                if (!this.grounded && isSolid(this.x, this.y + 1)) {
+                    this.grounded = true;
+                }
+
+                // Side wall collision
+                if (isSolid(this.x - 8, this.y - 10)) this.x += 1;
+                if (isSolid(this.x + 8, this.y - 10)) this.x -= 1;
+
+                // Canyon boundary blocking (prevent crossing)
+                const canyonStart = 850;
+                const canyonEnd = 1650;
+                const canyonBuffer = 30;
+                if (this.x > canyonStart - canyonBuffer && this.x < canyonStart + canyonBuffer) {
+                    // Push back to safe side based on which side they came from
+                    if (this.vx > 0) this.x = canyonStart - canyonBuffer;
+                    if (this.vx < 0) this.x = canyonStart - canyonBuffer;
+                }
+                if (this.x > canyonEnd - canyonBuffer && this.x < canyonEnd + canyonBuffer) {
+                    if (this.vx < 0) this.x = canyonEnd + canyonBuffer;
+                    if (this.vx > 0) this.x = canyonEnd + canyonBuffer;
+                }
+
+                // Bounds
+                this.x = Math.max(10, Math.min(WORLD_W - 10, this.x));
+
+                // Walk animation
+                if (this.grounded && Math.abs(this.vx) > 0.3) {
+                    this.walkCycle += 0.12;
+                }
+
+                // Drown
+                if (this.y > WORLD_H + 30) {
+                    this.hp = 0;
+                    this.dead = true;
+                }
+                if (this.hp <= 0) {
+                    this.dead = true;
+                }
+            }
+
+            draw(ctx) {
+                if (this.dead) return;
+
+                // Active indicator
+                if (this.isActive && gameState.phase === 'move') {
+                    ctx.save();
+                    ctx.fillStyle = '#ffff00';
+                    ctx.beginPath();
+                    ctx.moveTo(this.x, this.y - 52);
+                    ctx.lineTo(this.x - 6, this.y - 62);
+                    ctx.lineTo(this.x + 6, this.y - 62);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.restore();
+                }
+
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                if (this.facing === -1) ctx.scale(-1, 1);
+
+                if (this.team === 'cat') {
+                    this._drawCat(ctx);
+                } else {
+                    this._drawCapybara(ctx);
+                }
+                ctx.restore();
+
+                this._drawHealthBar(ctx);
+            }
+
+            _drawCat(ctx) {
+                const wc = this.walkCycle;
+                const bob = this.grounded ? Math.sin(wc * 2 * Math.PI) * 1.5 : 0;
+                const legSwing = Math.sin(wc * 2 * Math.PI) * 5;
+
+                // Tail
+                ctx.save();
+                ctx.strokeStyle = '#e8925a';
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.moveTo(-8, -8 + bob);
+                ctx.quadraticCurveTo(-22, -15 + Math.sin(wc * 4) * 8, -18, -26 + bob);
+                ctx.stroke();
+                ctx.restore();
+
+                // Body
+                ctx.fillStyle = '#f4a261';
+                ctx.beginPath();
+                ctx.ellipse(0, -12 + bob, 10, 11, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Front legs
+                ctx.fillStyle = '#e8925a';
+                ctx.fillRect(-4, -3 + bob + legSwing, 4, 7);
+                ctx.fillRect(2, -3 + bob - legSwing, 4, 7);
+
+                // Head
+                ctx.fillStyle = '#f4a261';
+                ctx.beginPath();
+                ctx.ellipse(5, -24 + bob, 9, 9, 0.15, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Ears
+                ctx.fillStyle = '#f4a261';
+                ctx.beginPath();
+                ctx.moveTo(1, -30 + bob);
+                ctx.lineTo(-2, -40 + bob);
+                ctx.lineTo(5, -31 + bob);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.moveTo(8, -31 + bob);
+                ctx.lineTo(12, -41 + bob);
+                ctx.lineTo(14, -31 + bob);
+                ctx.fill();
+
+                // Inner ears
+                ctx.fillStyle = '#f08080';
+                ctx.beginPath();
+                ctx.moveTo(1.5, -31 + bob);
+                ctx.lineTo(-0.5, -37 + bob);
+                ctx.lineTo(4, -32 + bob);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.moveTo(9, -32 + bob);
+                ctx.lineTo(12, -39 + bob);
+                ctx.lineTo(13, -32 + bob);
+                ctx.fill();
+
+                // Eyes
+                ctx.fillStyle = '#2a1a00';
+                ctx.beginPath();
+                ctx.ellipse(2, -25 + bob, 2.5, 3, -0.2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.ellipse(8, -25 + bob, 2.5, 3, 0.2, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Eye shine
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(3, -26 + bob, 0.9, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(9, -26 + bob, 0.9, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Nose
+                ctx.fillStyle = '#f08080';
+                ctx.beginPath();
+                ctx.ellipse(6, -21 + bob, 2.5, 1.8, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Whiskers
+                ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+                ctx.lineWidth = 0.8;
+                for (let i = -1; i <= 1; i += 2) {
+                    ctx.beginPath();
+                    ctx.moveTo(6, -21 + bob);
+                    ctx.lineTo(6 + i * 14, -20 + bob + i * 1.5);
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(6, -21 + bob);
+                    ctx.lineTo(6 + i * 13, -22 + bob);
+                    ctx.stroke();
+                }
+            }
+
+            _drawCapybara(ctx) {
+                const wc = this.walkCycle;
+                const bob = this.grounded ? Math.sin(wc * 2 * Math.PI) * 1 : 0;
+                const legSwing = Math.sin(wc * 2 * Math.PI) * 4;
+
+                // Body
+                ctx.fillStyle = '#b89c6a';
+                ctx.beginPath();
+                ctx.ellipse(0, -11 + bob, 17, 11, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Belly
+                ctx.fillStyle = '#c8b07a';
+                ctx.beginPath();
+                ctx.ellipse(-2, -8 + bob, 12, 7, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Legs
+                ctx.fillStyle = '#a08a5a';
+                const legYBase = -2 + bob;
+                ctx.fillRect(-14, legYBase + legSwing, 7, 8);
+                ctx.fillRect(-5, legYBase - legSwing, 7, 8);
+                ctx.fillRect(4, legYBase + legSwing, 7, 8);
+                ctx.fillRect(13, legYBase - legSwing, 7, 8);
+
+                // Head
+                ctx.fillStyle = '#b89c6a';
+                ctx.fillRect(5, -28 + bob, 22, 18);
+
+                // Muzzle
+                ctx.fillStyle = '#9a8050';
+                ctx.fillRect(22, -24 + bob, 6, 10);
+
+                // Nostrils
+                ctx.fillStyle = '#6a5030';
+                ctx.beginPath();
+                ctx.ellipse(25, -21 + bob, 1.5, 2, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.ellipse(25, -17 + bob, 1.5, 2, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Eyes
+                ctx.fillStyle = '#2a1a00';
+                ctx.beginPath();
+                ctx.arc(16, -22 + bob, 3, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Sleepy lid
+                ctx.fillStyle = '#b89c6a';
+                ctx.beginPath();
+                ctx.arc(16, -22 + bob, 3, Math.PI * 1.2, Math.PI * 1.8);
+                ctx.fill();
+
+                // Eyelid line
+                ctx.strokeStyle = '#2a1a00';
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                ctx.arc(16, -22 + bob, 3, Math.PI * 1.1, Math.PI * 1.9);
+                ctx.stroke();
+
+                // Eye shine
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(17, -23 + bob, 0.8, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Ears
+                ctx.fillStyle = '#a08060';
+                ctx.beginPath();
+                ctx.ellipse(8, -28 + bob, 4, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.ellipse(16, -30 + bob, 4, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            _drawHealthBar(ctx) {
+                const bw = 38;
+                const bh = 5;
+                const bx = this.x - bw / 2;
+                const by = this.y - 50;
+
+                ctx.fillStyle = 'rgba(0,0,0,0.7)';
+                ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
+
+                const pct = this.hp / this.maxHp;
+                ctx.fillStyle = pct > 0.5 ? '#33dd33' : pct > 0.25 ? '#dddd22' : '#dd2222';
+                ctx.fillRect(bx, by, bw * pct, bh);
+
+                ctx.fillStyle = this.team === 'cat' ? '#ffaa55' : '#99cc44';
+                ctx.font = 'bold 9px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(this.name, this.x, by - 1);
+            }
+        }
+
+        // ================================================================
+        // PROJECTILE CLASS
+        // ================================================================
+        class Projectile {
+            constructor(x, y, vx, vy, type) {
+                this.x = x;
+                this.y = y;
+                this.vx = vx;
+                this.vy = vy;
+                this.type = type;
+                this.active = true;
+                this.trail = [];
+                this.bounces = 0;
+                this.fuseTimer = type === 'bomb' ? 150 : null;
+                this.age = 0;
+            }
+
+            update(wind) {
+                this.age++;
+                this.trail.push({ x: this.x, y: this.y });
+                if (this.trail.length > 18) this.trail.shift();
+
+                this.vy += GRAVITY * 0.75;
+                this.vx += wind * 0.008;
+
+                // Store old position for raycast
+                const oldX = this.x;
+                const oldY = this.y;
+
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Fuse timer for bombs
+                if (this.fuseTimer !== null) {
+                    this.fuseTimer--;
+                    if (this.fuseTimer <= 0) {
+                        this.active = false;
+                        return 'explode';
+                    }
+                }
+
+                // Check collision along path (raycast style)
+                const dx = this.x - oldX;
+                const dy = this.y - oldY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const steps = Math.ceil(dist) + 1;
+
+                for (let i = 1; i <= steps; i++) {
+                    const t = i / steps;
+                    const checkX = oldX + dx * t;
+                    const checkY = oldY + dy * t;
+
+                    if (isSolid(checkX, checkY)) {
+                        this.x = checkX;
+                        this.y = checkY;
+
+                        if (this.type === 'carrot' || this.type === 'banana') {
+                            this.active = false;
+                            return 'explode';
+                        } else if (this.type === 'bomb') {
+                            this.vx *= -0.4;
+                            this.vy = Math.abs(this.vy) * -0.5;
+                            this.x = checkX - this.vx;
+                            this.y = checkY - 2;
+                            this.bounces++;
+                            if (this.bounces >= 3) {
+                                this.active = false;
+                                return 'explode';
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                if (this.x < -20 || this.x > WORLD_W + 20 || this.y > WORLD_H + 50) {
+                    this.active = false;
+                    return 'miss';
+                }
+
+                return null;
+            }
+
+            draw(ctx) {
+                // Trail
+                for (let i = 0; i < this.trail.length; i++) {
+                    const t = i / this.trail.length;
+                    ctx.globalAlpha = t * 0.5;
+                    ctx.fillStyle = this.type === 'carrot' ? '#ff8800' :
+                        this.type === 'banana' ? '#ffee00' : '#777777';
+                    ctx.beginPath();
+                    ctx.arc(this.trail[i].x, this.trail[i].y, 2 + t * 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.globalAlpha = 1;
+
+                const angle = Math.atan2(this.vy, this.vx);
+                ctx.save();
+                ctx.translate(this.x, this.y);
+
+                if (this.type === 'carrot') {
+                    ctx.rotate(angle);
+                    ctx.fillStyle = '#ff7722';
+                    ctx.beginPath();
+                    ctx.moveTo(12, 0);
+                    ctx.lineTo(-7, -4);
+                    ctx.lineTo(-7, 4);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.fillStyle = '#44bb44';
+                    ctx.beginPath();
+                    ctx.moveTo(-7, -1);
+                    ctx.quadraticCurveTo(-14, -12, -12, -16);
+                    ctx.quadraticCurveTo(-9, -10, -7, -4);
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.moveTo(-7, 0);
+                    ctx.quadraticCurveTo(-18, -7, -16, -12);
+                    ctx.quadraticCurveTo(-11, -5, -7, 2);
+                    ctx.fill();
+                } else if (this.type === 'bomb') {
+                    ctx.fillStyle = '#222222';
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 9, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#444444';
+                    ctx.beginPath();
+                    ctx.arc(-3, -3, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = '#aaaaaa';
+                    ctx.lineWidth = 2;
+                    ctx.lineCap = 'round';
+                    ctx.beginPath();
+                    ctx.moveTo(0, -9);
+                    ctx.quadraticCurveTo(8, -17, 5, -22);
+                    ctx.stroke();
+                    if (this.age % 2 === 0) {
+                        ctx.fillStyle = Math.random() > 0.5 ? '#ffee00' : '#ff8800';
+                        ctx.beginPath();
+                        ctx.arc(5 + (Math.random() - 0.5) * 2, -22 + (Math.random() - 0.5) * 2, 3, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                    if (this.fuseTimer && this.fuseTimer < 60) {
+                        ctx.fillStyle = `rgba(255, 0, 0, ${0.5 + Math.sin(this.age * 0.5) * 0.3})`;
+                        ctx.beginPath();
+                        ctx.arc(0, 0, 11, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                } else if (this.type === 'banana') {
+                    ctx.rotate(this.age * 0.15);
+                    ctx.strokeStyle = '#ffee00';
+                    ctx.lineWidth = 6;
+                    ctx.lineCap = 'round';
+                    ctx.beginPath();
+                    ctx.arc(0, 6, 14, Math.PI * 1.15, Math.PI * 1.85);
+                    ctx.stroke();
+                    ctx.strokeStyle = '#ddaa00';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+
+                ctx.restore();
+            }
+        }
+
+        // ================================================================
+        // PARTICLE CLASS
+        // ================================================================
+        class Particle {
+            constructor(x, y, vx, vy, color, life, size) {
+                this.x = x;
+                this.y = y;
+                this.vx = vx;
+                this.vy = vy;
+                this.color = color;
+                this.life = life;
+                this.maxLife = life;
+                this.size = size || (2 + Math.random() * 5);
+            }
+
+            update() {
+                this.vy += 0.18;
+                this.vx *= 0.97;
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life--;
+            }
+
+            draw(ctx) {
+                const a = Math.max(0, this.life / this.maxLife);
+                ctx.globalAlpha = a;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size * a, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+
+            get dead() {
+                return this.life <= 0 || this.y > WORLD_H + 20;
+            }
+        }
+
+        // ================================================================
+        // GAME STATE
+        // ================================================================
+        const gameState = {
+            phase: 'move',
+            currentTeam: 0,
+            charIndex: 0,
+            turnTimer: TURN_TIME,
+            wind: 0,
+            roundNum: 1,
+            cameraMode: 'pan', // 'pan', 'locked_char', 'locked_projectile'
+            cameraPanStart: 0,
+            cameraPanDuration: CAM_PAN_SPEED,
+
+            getTeamChars(team) {
+                const t = team === 0 ? 'cat' : 'capy';
+                return characters.filter(c => c.team === t && !c.dead);
+            },
+
+            getCurrentChar() {
+                const alive = this.getTeamChars(this.currentTeam);
+                if (alive.length === 0) return null;
+                return alive[this.charIndex % alive.length];
+            },
+
+            nextTurn() {
+                this.phase = 'settling';
+
+                // Calculate next team and set camera target immediately
+                this.currentTeam = 1 - this.currentTeam;
+                this.charIndex++;
+                this.roundNum++;
+
+                const nextChar = this.getCurrentChar();
+                if (nextChar) {
+                    cameraTargetX = nextChar.x - VIEWPORT_W / 2;
+                    cameraTargetX = Math.max(0, Math.min(WORLD_W - VIEWPORT_W, cameraTargetX));
+                }
+                cameraTargetY = 0; // Return to ground level
+
+                gameState.cameraMode = 'pan';
+                gameState.cameraPanStart = Date.now();
+
+                setTimeout(() => {
+                    const catsAlive = this.getTeamChars(0).length;
+                    const capysAlive = this.getTeamChars(1).length;
+                    if (catsAlive === 0) {
+                        this.endGame('capy');
+                        return;
+                    }
+                    if (capysAlive === 0) {
+                        this.endGame('cat');
+                        return;
+                    }
+
+                    this.wind = (Math.random() - 0.5) * 5;
+                    this.turnTimer = TURN_TIME;
+                    this.phase = 'move';
+                    selectedWeapon = 'carrot';
+                    power = 0;
+                    charging = false;
+
+                    updateUI();
+                }, 1500); // Shorter delay - camera pan happens during this time
+            },
+
+            endGame(winner) {
+                this.phase = 'gameover';
+                const msg = winner === 'cat' ? '🐱 CATS WIN! 🐱' : '🐾 CAPYBARAS WIN! 🐾';
+                document.getElementById('turnInfo').innerHTML =
+                    `<span style="color:#ffdd44;font-size:18px;font-weight:bold">${msg}</span> <span style="color:#aaa;font-size:13px;"> — Press R to restart</span>`;
+            }
+        };
+
+        // ================================================================
+        // GLOBALS
+        // ================================================================
+        let characters = [];
+        let projectile = null;
+        let particles = [];
+        let selectedWeapon = 'carrot';
+        let power = 0;
+        let charging = false;
+        let mouseWorldX = 0;
+        let mouseWorldY = 0;
+        let aimAngle = 0;
+        let explosionFlash = 0;
+
+        const keys = {};
+
+        // ================================================================
+        // INPUT HANDLING
+        // ================================================================
+        canvas.addEventListener('mousemove', e => {
+            const r = canvas.getBoundingClientRect();
+            const screenX = (e.clientX - r.left) / (r.width / VIEWPORT_W);
+            const screenY = (e.clientY - r.top) / (r.height / VIEWPORT_H);
+            mouseWorldX = screenX + cameraX;
+            mouseWorldY = screenY + cameraY;
+        });
+
+        window.addEventListener('keydown', e => {
+            keys[e.key] = true;
+            if (e.key === ' ') e.preventDefault();
+
+            if ((e.key === 'r' || e.key === 'R') && gameState.phase === 'gameover') {
+                initGame();
+            }
+            if (e.key === '1') selectedWeapon = 'carrot';
+            if (e.key === '2') selectedWeapon = 'bomb';
+            if (e.key === '3') selectedWeapon = 'banana';
+
+            if (e.key === ' ' && gameState.phase === 'move') {
+                const char = gameState.getCurrentChar();
+                if (char && char.grounded && !charging) {
+                    char.vy = -9;
+                    char.grounded = false;
+                }
+            }
+        });
+
+        window.addEventListener('keyup', e => {
+            keys[e.key] = false;
+        });
+
+        canvas.addEventListener('mousedown', e => {
+            if (e.button === 0) {
+                const r = canvas.getBoundingClientRect();
+                const mx = (e.clientX - r.left) / (r.width / VIEWPORT_W);
+                const my = (e.clientY - r.top) / (r.height / VIEWPORT_H);
+
+                const wBtnW = 58;
+                const wBtns = ['carrot', 'bomb', 'banana'];
+                const wStartX = VIEWPORT_W / 2 - (wBtns.length * wBtnW) / 2;
+                const wBtnY = VIEWPORT_H - 58;
+
+                let clickedWeapon = false;
+                wBtns.forEach((w, i) => {
+                    const bx = wStartX + i * wBtnW;
+                    if (mx >= bx && mx <= bx + wBtnW && my >= wBtnY && my <= wBtnY + 50) {
+                        selectedWeapon = w;
+                        clickedWeapon = true;
+                    }
+                });
+
+                if (!clickedWeapon && gameState.phase === 'move') {
+                    charging = true;
+                }
+            }
+        });
+
+        canvas.addEventListener('mouseup', e => {
+            if (e.button === 0 && gameState.phase === 'move' && charging) {
+                fire();
+            }
+            charging = false;
+        });
+
+        // ================================================================
+        // GAME MECHANICS
+        // ================================================================
+        function fire() {
+            if (gameState.phase !== 'move') return;
+            const char = gameState.getCurrentChar();
+            if (!char) return;
+
+            const speed = 7 + power * 0.15; // Increased base speed and power multiplier
+            const originX = char.x + Math.cos(aimAngle) * 18;
+            const originY = char.y - 22 + Math.sin(aimAngle) * 18;
+
+            projectile = new Projectile(originX, originY,
+                Math.cos(aimAngle) * speed, Math.sin(aimAngle) * speed,
+                selectedWeapon);
+
+            gameState.phase = 'fire';
+            gameState.cameraMode = 'locked_projectile';
+            power = 0;
+            charging = false;
+        }
+
+        function explode(x, y, radius, damage) {
+            destroyTerrain(x, y, radius);
+            explosionFlash = 6;
+
+            characters.forEach(c => {
+                if (c.dead) return;
+                const dx = c.x - x;
+                const dy = (c.y - 15) - y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const effectR = radius * 1.8;
+                if (dist < effectR) {
+                    const pct = 1 - dist / effectR;
+                    const dmg = Math.round(damage * pct);
+                    c.hp = Math.max(0, c.hp - dmg);
+                    const kb = pct * 14;
+                    const ang = Math.atan2(dy, dx);
+                    c.vx += Math.cos(ang) * kb;
+                    c.vy += Math.sin(ang) * kb - 4;
+                    c.grounded = false;
+                    c.stunned = 30;
+                }
+            });
+
+            // Fire/smoke particles
+            for (let i = 0; i < 35; i++) {
+                const ang = Math.random() * Math.PI * 2;
+                const spd = 2 + Math.random() * 7;
+                const colors = ['#ff4400', '#ff8800', '#ffcc00', '#ff2200', '#cc4400'];
+                particles.push(new Particle(x, y,
+                    Math.cos(ang) * spd, Math.sin(ang) * spd - 2,
+                    colors[Math.floor(Math.random() * colors.length)],
+                    25 + Math.random() * 25, 3 + Math.random() * 5));
+            }
+            for (let i = 0; i < 20; i++) {
+                const ang = Math.random() * Math.PI * 2;
+                const spd = 1 + Math.random() * 4;
+                particles.push(new Particle(x, y,
+                    Math.cos(ang) * spd, Math.sin(ang) * spd - 3,
+                    `hsl(0,0%,${50 + Math.random() * 30}%)`,
+                    40 + Math.random() * 40, 4 + Math.random() * 6));
+            }
+        }
+
+        // ================================================================
+        // INITIALIZATION
+        // ================================================================
+        function initGame() {
+            terrainHeights = generateTerrain();
+            characters = [];
+            particles = [];
+            projectile = null;
+            gameState.phase = 'move';
+            gameState.currentTeam = 0;
+            gameState.charIndex = 0;
+            gameState.roundNum = 1;
+            gameState.wind = (Math.random() - 0.5) * 4;
+            selectedWeapon = 'carrot';
+            power = 0;
+            charging = false;
+
+            const catNames = ['Miso', 'Nova'];
+            for (let i = 0; i < 2; i++) {
+                const x = 200 + i * 150;
+                const y = getGroundY(x) - 1;
+                const c = new Character(x, y, 'cat', catNames[i]);
+                c.facing = 1;
+                characters.push(c);
+            }
+
+            const capyNames = ['Capy', 'Bubba'];
+            for (let i = 0; i < 2; i++) {
+                const x = 2050 + i * 150;
+                const y = getGroundY(x) - 1;
+                const c = new Character(x, y, 'capy', capyNames[i]);
+                c.facing = -1;
+                characters.push(c);
+            }
+
+            // Start camera on cats team
+            const firstChar = gameState.getCurrentChar();
+            if (firstChar) {
+                cameraX = firstChar.x - VIEWPORT_W / 2;
+                cameraTargetX = cameraX;
+                cameraX = Math.max(0, Math.min(WORLD_W - VIEWPORT_W, cameraX));
+                cameraTargetX = cameraX;
+            }
+
+            updateUI();
+        }
+
+        function updateUI() {
+            if (gameState.phase === 'gameover') return;
+            const teamName = gameState.currentTeam === 0 ? '🐱 CATS' : '🐾 CAPYBARAS';
+            const char = gameState.getCurrentChar();
+            const charName = char ? char.name : '—';
+            const windDir = gameState.wind >= 0 ? '→' : '←';
+            const windStr = Math.abs(gameState.wind).toFixed(1);
+            const t = Math.max(0, Math.ceil(gameState.turnTimer));
+            document.getElementById('turnInfo').innerHTML =
+                `${teamName} · <b>${charName}</b> · ⏱ ${t}s · 💨 ${windDir}${windStr} · Rd ${gameState.roundNum}`;
+        }
+
+        // ================================================================
+        // GAME LOOP
+        // ================================================================
+        let lastTimestamp = 0;
+
+        function loop(ts) {
+            const dt = Math.min((ts - lastTimestamp) / 16.67, 3);
+            lastTimestamp = ts;
+
+            update(dt);
+            render();
+
+            requestAnimationFrame(loop);
+        }
+
+        function update(dt) {
+            if (gameState.phase === 'gameover') return;
+
+            // Update camera
+            if (gameState.cameraMode === 'pan') {
+                // Smooth pan to target (X and Y)
+                const elapsed = Date.now() - gameState.cameraPanStart;
+                const progress = Math.min(elapsed / gameState.cameraPanDuration, 1);
+                const easeProgress = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
+
+                const panStartX = cameraX;
+                const panDistanceX = cameraTargetX - panStartX;
+                cameraX = panStartX + panDistanceX * easeProgress;
+
+                const panStartY = cameraY;
+                const panDistanceY = cameraTargetY - panStartY;
+                cameraY = panStartY + panDistanceY * easeProgress;
+
+                if (progress >= 1) {
+                    cameraX = cameraTargetX;
+                    cameraY = cameraTargetY;
+                    gameState.cameraMode = 'locked_char';
+                }
+            } else if (gameState.cameraMode === 'locked_projectile' && projectile) {
+                // Follow projectile (both X and Y)
+                cameraX = projectile.x - VIEWPORT_W / 2;
+                cameraY = projectile.y - VIEWPORT_H / 2;
+                cameraX = Math.max(0, Math.min(WORLD_W - VIEWPORT_W, cameraX));
+                cameraY = Math.max(-600, Math.min(0, cameraY)); // Allow panning up far to see high shots
+            } else if (gameState.cameraMode === 'locked_explosion') {
+                // Stay frozen on explosion location - don't move camera
+                // Camera stays at its current position
+            } else if (gameState.cameraMode === 'locked_char') {
+                // Keep camera centered on active character (Y stays at 0 for ground level)
+                const char = gameState.getCurrentChar();
+                if (char) {
+                    const targetX = char.x - VIEWPORT_W / 2;
+                    cameraX += (targetX - cameraX) * 0.1; // Smooth follow
+                    cameraX = Math.max(0, Math.min(WORLD_W - VIEWPORT_W, cameraX));
+                    cameraY += (0 - cameraY) * 0.1; // Return to ground level
+                }
+            }
+
+            if (gameState.phase === 'move') {
+                gameState.turnTimer -= dt / 60;
+                if (gameState.turnTimer <= 0) {
+                    gameState.turnTimer = 0;
+                    gameState.nextTurn();
+                    return;
+                }
+
+                const char = gameState.getCurrentChar();
+                if (char && char.stunned === 0) {
+                    if (keys['ArrowLeft']) {
+                        char.vx = -2.8;
+                        char.facing = -1;
+                    }
+                    if (keys['ArrowRight']) {
+                        char.vx = 2.8;
+                        char.facing = 1;
+                    }
+
+                    aimAngle = Math.atan2(mouseWorldY - (char.y - 22), mouseWorldX - char.x);
+
+                    if (charging) {
+                        power = Math.min(100, power + dt * 2);
+                    }
+                }
+
+                updateUI();
+            }
+
+            characters.forEach(c => c.update());
+
+            if (projectile && projectile.active) {
+                const result = projectile.update(gameState.wind);
+                if (result === 'explode') {
+                    const radius = projectile.type === 'bomb' ? 65 :
+                        projectile.type === 'banana' ? 48 : 38;
+                    const damage = projectile.type === 'bomb' ? 55 :
+                        projectile.type === 'banana' ? 38 : 32;
+                    explode(projectile.x, projectile.y, radius, damage);
+                    projectile = null;
+                    gameState.cameraMode = 'locked_explosion'; // Keep camera frozen on explosion
+                    // Wait 1 second to show explosion and damage, then pan to next team
+                    setTimeout(() => gameState.nextTurn(), 1000);
+                } else if (result === 'miss' || !projectile?.active) {
+                    projectile = null;
+                    gameState.cameraMode = 'locked_explosion'; // Keep camera frozen on miss
+                    setTimeout(() => gameState.nextTurn(), 800);
+                }
+            }
+
+            particles.forEach(p => p.update());
+            particles = particles.filter(p => !p.dead);
+
+            if (explosionFlash > 0) explosionFlash--;
+        }
+
+        function render() {
+            // Sky with gradient that extends higher for upward shots
+            const sky = ctx.createLinearGradient(0, -600, 0, VIEWPORT_H);
+            sky.addColorStop(0, '#0a0a1a');
+            sky.addColorStop(0.2, '#0f0f2e');
+            sky.addColorStop(0.5, '#1a2a50');
+            sky.addColorStop(1, '#2a4a6a');
+            ctx.fillStyle = sky;
+            ctx.fillRect(0, -600, VIEWPORT_W, VIEWPORT_H + 600);
+
+            // Clouds parallax background
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+            const cloudTime = Date.now() * 0.0001;
+            for (let i = 0; i < 5; i++) {
+                const cloudY = 50 + i * 60;
+                const cloudX = ((i * 400 + cloudTime * 100) % (WORLD_W + 200)) - 100;
+                ctx.beginPath();
+                ctx.ellipse(cloudX - cameraX, cloudY - cameraY * 0.5, 80, 30, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.ellipse(cloudX - cameraX + 60, cloudY - cameraY * 0.5, 90, 35, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.ellipse(cloudX - cameraX + 120, cloudY - cameraY * 0.5, 80, 30, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Stars (parallax far background)
+            stars.forEach(s => {
+                const twinkle = 0.5 + Math.sin(Date.now() * 0.001 + s.bright * 10) * 0.3;
+                ctx.globalAlpha = twinkle * 0.6;
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(s.x - cameraX * 0.3, s.y - cameraY * 0.2, s.r, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.globalAlpha = 1;
+
+            // Moon
+            ctx.fillStyle = '#f5f0c0';
+            ctx.beginPath();
+            ctx.arc(WORLD_W - 200 - cameraX * 0.2, 50 - cameraY * 0.3, 28, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#1a2a50';
+            ctx.beginPath();
+            ctx.arc(WORLD_W - 188 - cameraX * 0.2, 45 - cameraY * 0.3, 24, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Water (bottom)
+            const waterY = WORLD_H - 38;
+            const waterGrad = ctx.createLinearGradient(0, waterY, 0, VIEWPORT_H);
+            waterGrad.addColorStop(0, '#1a6a9a');
+            waterGrad.addColorStop(1, '#0a3a5a');
+            ctx.fillStyle = waterGrad;
+            ctx.fillRect(-VIEWPORT_W, waterY, VIEWPORT_W * 3, VIEWPORT_H);
+
+            // Water shimmer
+            const t = Date.now() * 0.001;
+            ctx.strokeStyle = 'rgba(100, 200, 255, 0.3)';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 5; i++) {
+                ctx.beginPath();
+                ctx.moveTo(-cameraX, waterY + 5 + i * 7 + Math.sin(t + i) * 2);
+                ctx.lineTo(VIEWPORT_W - cameraX, waterY + 5 + i * 7 + Math.sin(t + i + 1) * 2);
+                ctx.stroke();
+            }
+
+            // Apply camera transform for world objects
+            ctx.save();
+            ctx.translate(-cameraX, -cameraY);
+
+            // Terrain
+            ctx.drawImage(terrainCanvas, 0, 0);
+
+            // Characters
+            characters.forEach(c => c.draw(ctx));
+
+            // Particles
+            particles.forEach(p => p.draw(ctx));
+
+            // Projectile
+            if (projectile) projectile.draw(ctx);
+
+            ctx.restore(); // End camera transform
+
+            // Aim indicator (screen space)
+            if (gameState.phase === 'move') {
+                const char = gameState.getCurrentChar();
+                if (char) {
+                    const screenCharX = char.x - cameraX;
+                    const screenCharY = char.y - cameraY;
+                    const aimLen = 35 + power * 0.35;
+                    const ax = screenCharX + Math.cos(aimAngle) * aimLen;
+                    const ay = screenCharY - 22 + Math.sin(aimAngle) * aimLen;
+
+                    ctx.setLineDash([5, 5]);
+                    ctx.strokeStyle = 'rgba(255, 255, 100, 0.8)';
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.moveTo(screenCharX, screenCharY - 22);
+                    ctx.lineTo(ax, ay);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+
+                    ctx.fillStyle = 'rgba(255, 255, 100, 0.9)';
+                    ctx.beginPath();
+                    ctx.arc(ax, ay, 4, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    if (charging) {
+                        const pbX = screenCharX - 24;
+                        const pbY = screenCharY - 47;
+                        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+                        ctx.fillRect(pbX - 1, pbY - 1, 50, 9);
+                        const pColor = power < 40 ? '#44ee44' : power < 75 ? '#eeee22' : '#ee2222';
+                        ctx.fillStyle = pColor;
+                        ctx.fillRect(pbX, pbY, power * 0.48, 7);
+                        ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(pbX - 1, pbY - 1, 50, 9);
+
+                        ctx.fillStyle = 'white';
+                        ctx.font = '9px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(`${Math.round(power)}%`, screenCharX, pbY - 3);
+                    }
+                }
+            }
+
+            // Explosion flash (full screen)
+            if (explosionFlash > 0) {
+                ctx.fillStyle = `rgba(255,200,100,${(explosionFlash / 6) * 0.4})`;
+                ctx.fillRect(0, 0, VIEWPORT_W, VIEWPORT_H);
+            }
+
+            // HUD (screen space)
+            renderHUD();
+        }
+
+        function renderHUD() {
+            const cats = characters.filter(c => c.team === 'cat');
+            const capys = characters.filter(c => c.team === 'capy');
+
+            // Left panel - Cats
+            ctx.fillStyle = 'rgba(0,0,0,0.55)';
+            ctx.fillRect(8, 8, 160, 20 + cats.length * 18);
+
+            ctx.fillStyle = '#ff9944';
+            ctx.font = 'bold 11px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText('🐱 CATS', 13, 24);
+
+            cats.forEach((c, i) => {
+                const y = 32 + i * 18;
+                ctx.fillStyle = '#444';
+                ctx.fillRect(13, y, 100, 6);
+                ctx.fillStyle = c.dead ? '#444' : c.hp > 50 ? '#33cc33' : c.hp > 25 ? '#cccc22' : '#cc2222';
+                ctx.fillRect(13, y, 100 * (c.hp / 100), 6);
+                ctx.fillStyle = c.dead ? '#666' : 'white';
+                ctx.font = '9px Arial';
+                ctx.fillText(`${c.name}: ${c.dead ? '☠' : c.hp}`, 118, y + 7);
+
+                if (gameState.getCurrentChar() === c) {
+                    ctx.fillStyle = '#ffee00';
+                    ctx.font = '9px Arial';
+                    ctx.fillText('◄', 5, y + 7);
+                }
+            });
+
+            // Right panel - Capys
+            const rpX = VIEWPORT_W - 168;
+            ctx.fillStyle = 'rgba(0,0,0,0.55)';
+            ctx.fillRect(rpX, 8, 160, 20 + capys.length * 18);
+
+            ctx.fillStyle = '#99cc44';
+            ctx.font = 'bold 11px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText('🐾 CAPYBARAS', rpX + 5, 24);
+
+            capys.forEach((c, i) => {
+                const y = 32 + i * 18;
+                ctx.fillStyle = '#444';
+                ctx.fillRect(rpX + 5, y, 100, 6);
+                ctx.fillStyle = c.dead ? '#444' : c.hp > 50 ? '#33cc33' : c.hp > 25 ? '#cccc22' : '#cc2222';
+                ctx.fillRect(rpX + 5, y, 100 * (c.hp / 100), 6);
+                ctx.fillStyle = c.dead ? '#666' : 'white';
+                ctx.font = '9px Arial';
+                ctx.fillText(`${c.name}: ${c.dead ? '☠' : c.hp}`, rpX + 110, y + 7);
+
+                if (gameState.getCurrentChar() === c) {
+                    ctx.fillStyle = '#ffee00';
+                    ctx.font = '9px Arial';
+                    ctx.fillText('◄', rpX + 157, y + 7);
+                }
+            });
+
+            // Weapon bar
+            const weapons = [
+                { id: 'carrot', emoji: '🥕', key: '1' },
+                { id: 'bomb', emoji: '💣', key: '2' },
+                { id: 'banana', emoji: '🍌', key: '3' },
+            ];
+            const wW = 55;
+            const wH = 52;
+            const wTotalW = weapons.length * wW;
+            const wX0 = VIEWPORT_W / 2 - wTotalW / 2;
+            const wY0 = VIEWPORT_H - wH - 8;
+
+            weapons.forEach((w, i) => {
+                const bx = wX0 + i * wW;
+                const isSelected = selectedWeapon === w.id;
+
+                ctx.fillStyle = isSelected ? 'rgba(255,200,0,0.85)' : 'rgba(0,0,0,0.55)';
+                ctx.fillRect(bx + 2, wY0 + 2, wW - 4, wH - 4);
+
+                if (isSelected) {
+                    ctx.strokeStyle = '#ffdd00';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(bx + 2, wY0 + 2, wW - 4, wH - 4);
+                }
+
+                ctx.font = '24px serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(w.emoji, bx + wW / 2, wY0 + 30);
+
+                ctx.font = '10px Arial';
+                ctx.fillStyle = isSelected ? '#000' : '#aaa';
+                ctx.fillText(`[${w.key}]`, bx + wW / 2, wY0 + 44);
+            });
+
+            // Turn phase indicator
+            if (gameState.phase === 'settling') {
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.fillRect(VIEWPORT_W / 2 - 80, VIEWPORT_H / 2 - 20, 160, 35);
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 14px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('⏳ Resolving...', VIEWPORT_W / 2, VIEWPORT_H / 2 + 3);
+            }
+        }
+
+        // ================================================================
+        // START
+        // ================================================================
+        initGame();
+        requestAnimationFrame(loop);
+    </script>
+</body>
+</html>
