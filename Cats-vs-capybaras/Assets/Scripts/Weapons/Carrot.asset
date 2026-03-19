@@ -1,0 +1,23 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3908cc331c85e4026ad4e1ae34ef7831, type: 3}
+  m_Name: Carrot
+  m_EditorClassIdentifier: Assembly-CSharp::CatsVsCapybaras.WeaponData
+  weaponName: Unnamed
+  description: 
+  icon: {fileID: -2413806693520163455, guid: 77282ea6a5bbb4229a545ed3f15e70eb, type: 3}
+  projectilePrefab: {fileID: 4797705444134508275, guid: d2a369539709b426a984b9192f806f56, type: 3}
+  damage: 30
+  explosionRadius: 2
+  minPower: 5
+  maxPower: 15
+  startingAmmo: -1
